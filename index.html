@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Icon Searcher</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            dark: {
+              bg: '#0f0f0f',
+              card: '#1a1a1a',
+              border: '#2a2a2a',
+              hover: '#252525'
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <script type="importmap">
+  {
+    "imports": {
+      "preact": "https://esm.sh/preact@10.19.3",
+      "preact/hooks": "https://esm.sh/preact@10.19.3/hooks",
+      "preact/compat": "https://esm.sh/preact@10.19.3/compat",
+      "htm": "https://esm.sh/htm@3.1.1"
+    }
+  }
+  </script>
+  <style>
+    .icon-mask {
+      background-color: currentColor;
+      -webkit-mask-size: 100% 100%;
+      mask-size: 100% 100%;
+      -webkit-mask-repeat: no-repeat;
+      mask-repeat: no-repeat;
+      -webkit-mask-position: center;
+      mask-position: center;
+    }
+    .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+    .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+    .scrollbar-thin::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+    .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #555; }
+    .fade-in { animation: fadeIn 0.2s ease-out; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+  </style>
+</head>
+<body class="bg-white dark:bg-dark-bg text-gray-900 dark:text-gray-100 min-h-screen transition-colors">
+  <div id="app"></div>
+
+  <script type="module">
+    import { h, render, Fragment } from 'preact';
+    import { useState, useEffect, useCallback, useRef, useMemo } from 'preact/hooks';
+    import htm from 'htm';
+
+    const html = htm.bind(h);
+
+    // Constants
+    const API_BASE = 'https://api.iconify.design';
+    const API_LIMIT = 999;
+    const ITEMS_PER_PAGE = 64;
+    const STORAGE_KEYS = {
+      favorites: 'icon-searcher-favorites',
+      recents: 'icon-searcher-recents',
+      darkMode: 'icon-searcher-dark-mode'
+    };
+
+    // Storage helpers
+    const storage = {
+      get: (key, fallback = []) => {
+        try {
+          const data = localStorage.getItem(key);
+          return data ? JSON.parse(data) : fallback;
+        } catch { return fallback; }
+      },
+      set: (key, value) => {
+        try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+      }
+    };
+
+    // Multi-color icon set prefixes (these use img, others use CSS mask for dark mode)
+    const MULTI_COLOR_PREFIXES = new Set([
+      'skill-icons', 'logos', 'emojione', 'emojione-v1', 'noto', 'twemoji',
+      'fluent-emoji', 'openmoji', 'circle-flags', 'flagpack', 'flag',
+      'currency', 'vscode-icons', 'file-icons', 'simple-icons', 'brandico',
+      'brandico-font', 'cryptocurrency', 'cryptocurrency-color', 'fad',
+      'mdi-light', 'whh', 'wi', 'map', 'game-icons', 'pixelarticons'
+    ]);
+
+    // Icon component: CSS mask for monotone (dark mode support), img for multi-color
+    function Icon({ name, size = 24, className = '', onClick, title }) {
+      const [prefix, ...iconParts] = name.split(':');
+      const iconName = iconParts.join(':') || name;
+      const url = `${API_BASE}/${prefix}/${iconName}.svg`;
+      const isMultiColor = MULTI_COLOR_PREFIXES.has(prefix);
+
+      if (isMultiColor) {
+        return html`
+          <img 
+            src=${url}
+            width=${size}
+            height=${size}
+            class=${`cursor-pointer ${className}`}
+            style=${`display: inline-block; vertical-align: middle;`}
+            onClick=${onClick}
+            title=${title || name}
+            alt=${title || name}
+            loading="lazy"
+          />
+        `;
+      }
+
+      // Monotone icons: use CSS mask to inherit text color for dark mode
+      const style = {
+        display: 'inline-block',
+        width: `${size}px`,
+        height: `${size}px`,
+        WebkitMaskImage: `url('${url}')`,
+        maskImage: `url('${url}')`
+      };
+
+      return html`
+        <span 
+          class=${`icon-mask cursor-pointer ${className}`}
+          style=${style}
+          onClick=${onClick}
+          title=${title || name}
+        />
+      `;
+    }
+
+    // Toast notification
+    function Toast({ message, type = 'success', onClose }) {
+      useEffect(() => {
+        const timer = setTimeout(onClose, 2000);
+        return () => clearTimeout(timer);
+      }, [onClose]);
+
+      const bgColor = type === 'success' ? 'bg-green-600' : 'bg-blue-600';
+      
+      return html`
+        <div class=${`fixed bottom-4 right-4 ${bgColor} text-white px-4 py-2 rounded-lg shadow-lg fade-in z-50`}>
+          ${message}
+        </div>
+      `;
+    }
+
+    // Search input component
+    function SearchInput({ value, onChange, onSearch, isLoading }) {
+      const inputRef = useRef(null);
+
+      useEffect(() => {
+        inputRef.current?.focus();
+      }, []);
+
+      const handleKeydown = (e) => {
+        if (e.key === 'Enter') onSearch();
+      };
+
+      return html`
+        <div class="relative">
+          <${Icon} name="mdi:magnify" size=${20} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input
+            ref=${inputRef}
+            type="text"
+            value=${value}
+            onInput=${(e) => onChange(e.target.value)}
+            onKeyDown=${handleKeydown}
+            placeholder="Search icons... (e.g., home, arrow, user)"
+            class="w-full pl-10 pr-4 py-3 bg-gray-100 dark:bg-dark-card border border-gray-200 dark:border-dark-border rounded-xl text-gray-900 dark:text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+          />
+          ${isLoading && html`
+            <div class="absolute right-3 top-1/2 -translate-y-1/2">
+              <${Icon} name="mdi:loading" size=${20} className="animate-spin" />
+            </div>
+          `}
+        </div>
+      `;
+    }
+
+    // Tab component
+    function Tabs({ activeTab, onChange }) {
+      const tabs = [
+        { id: 'search', label: 'Search', icon: 'mdi:magnify' },
+        { id: 'favorites', label: 'Favorites', icon: 'mdi:heart' },
+        { id: 'recents', label: 'Recents', icon: 'mdi:history' }
+      ];
+
+      return html`
+        <div class="flex gap-1 p-1 bg-gray-100 dark:bg-dark-card rounded-xl">
+          ${tabs.map(tab => html`
+            <button
+              key=${tab.id}
+              onClick=${() => onChange(tab.id)}
+              class=${`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${
+                activeTab === tab.id
+                  ? 'bg-white dark:bg-dark-hover text-blue-600 dark:text-blue-400 shadow'
+                  : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
+              }`}
+            >
+              <${Icon} name=${tab.icon} size=${18} />
+              <span class="hidden sm:inline">${tab.label}</span>
+            </button>
+          `)}
+        </div>
+      `;
+    }
+
+    // Icon card component
+    function IconCard({ icon, isFavorite, onToggleFavorite, onCopy, onAddRecent }) {
+      const handleCopy = (format) => {
+        const [prefix, ...parts] = icon.split(':');
+        const iconName = parts.join(':') || icon;
+        const url = `${API_BASE}/${prefix}/${iconName}.svg`;
+        
+        let text;
+        switch (format) {
+          case 'name':
+            text = icon;
+            break;
+          case 'url':
+            text = url;
+            break;
+          case 'svg':
+            text = `<img src="${url}" />`;
+            break;
+          case 'html':
+            text = `<span style="background-color:currentColor;-webkit-mask-image:url('${url}');mask-image:url('${url}');width:24px;height:24px;display:inline-block;mask-size:100%;"></span>`;
+            break;
+        }
+        
+        navigator.clipboard.writeText(text);
+        onAddRecent(icon);
+        onCopy(`Copied ${format}!`);
+      };
+
+      return html`
+        <div class="group relative bg-gray-50 dark:bg-dark-card border border-gray-200 dark:border-dark-border rounded-xl p-3 hover:border-blue-500 dark:hover:border-blue-500 transition-all fade-in aspect-square">
+          <div class="flex flex-col items-center justify-center h-full gap-1">
+            <div class="flex-1 flex items-center justify-center text-gray-700 dark:text-gray-200">
+              <${Icon} name=${icon} size=${32} />
+            </div>
+            <span class="text-xs text-gray-500 dark:text-gray-400 text-center truncate w-full" title=${icon}>
+              ${icon.split(':')[1] || icon}
+            </span>
+          </div>
+          
+          <div class="absolute inset-0 bg-black/70 rounded-xl opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-1.5 p-2 overflow-hidden">
+            <div class="grid grid-cols-2 gap-1 w-full px-1">
+              <button
+                onClick=${() => handleCopy('name')}
+                class="px-1.5 py-1 bg-white/20 hover:bg-white/30 rounded text-xs text-white transition-colors truncate"
+                title="Copy icon name"
+              >
+                Name
+              </button>
+              <button
+                onClick=${() => handleCopy('url')}
+                class="px-1.5 py-1 bg-white/20 hover:bg-white/30 rounded text-xs text-white transition-colors truncate"
+                title="Copy SVG URL"
+              >
+                URL
+              </button>
+              <button
+                onClick=${() => handleCopy('svg')}
+                class="px-1.5 py-1 bg-white/20 hover:bg-white/30 rounded text-xs text-white transition-colors truncate"
+                title="Copy as img tag"
+              >
+                IMG
+              </button>
+              <button
+                onClick=${() => handleCopy('html')}
+                class="px-1.5 py-1 bg-white/20 hover:bg-white/30 rounded text-xs text-white transition-colors truncate"
+                title="Copy as CSS mask"
+              >
+                CSS
+              </button>
+            </div>
+            <button
+              onClick=${() => onToggleFavorite(icon)}
+              class=${`p-1.5 rounded-full transition-colors ${
+                isFavorite 
+                  ? 'bg-red-500 text-white' 
+                  : 'bg-white/20 hover:bg-white/30 text-white'
+              }`}
+              title=${isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+            >
+              <${Icon} name=${isFavorite ? 'mdi:heart' : 'mdi:heart-outline'} size=${16} />
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    // Pagination component
+    function Pagination({ currentPage, totalPages, totalResults, start, end, onChange }) {
+      // Ensure we have valid numbers
+      const safeTotal = Math.max(0, totalResults || 0);
+      const safePages = Math.max(1, totalPages || 1);
+      const safeCurrent = Math.max(0, Math.min(currentPage || 0, safePages - 1));
+      
+      const pages = useMemo(() => {
+        const arr = [];
+        const maxVisible = 5;
+        let startPage = Math.max(0, safeCurrent - Math.floor(maxVisible / 2));
+        let endPage = Math.min(safePages - 1, startPage + maxVisible - 1);
+        
+        if (endPage - startPage + 1 < maxVisible) {
+          startPage = Math.max(0, endPage - maxVisible + 1);
+        }
+        
+        for (let i = startPage; i <= endPage; i++) arr.push(i);
+        return arr;
+      }, [safeCurrent, safePages]);
+
+      if (safePages <= 1) return null;
+
+      return html`
+        <div class="flex flex-col sm:flex-row items-center justify-between gap-4 mt-6 p-4 bg-gray-50 dark:bg-dark-card rounded-xl">
+          <span class="text-sm text-gray-500 dark:text-gray-400">
+            Showing ${start + 1}-${end} of ${safeTotal} icons
+          </span>
+          
+          <div class="flex items-center gap-1">
+            <button
+              onClick=${() => onChange(0)}
+              disabled=${safeCurrent === 0}
+              class="p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-dark-hover disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              title="First page"
+            >
+              <${Icon} name="mdi:page-first" size=${20} />
+            </button>
+            <button
+              onClick=${() => onChange(safeCurrent - 1)}
+              disabled=${safeCurrent === 0}
+              class="p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-dark-hover disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              title="Previous page"
+            >
+              <${Icon} name="mdi:chevron-left" size=${20} />
+            </button>
+            
+            ${pages[0] > 0 && html`<span class="px-2 text-gray-400">...</span>`}
+            
+            ${pages.map(p => html`
+              <button
+                key=${p}
+                onClick=${() => onChange(p)}
+                class=${`w-10 h-10 rounded-lg font-medium transition-colors ${
+                  p === safeCurrent
+                    ? 'bg-blue-500 text-white'
+                    : 'hover:bg-gray-200 dark:hover:bg-dark-hover text-gray-600 dark:text-gray-300'
+                }`}
+              >
+                ${p + 1}
+              </button>
+            `)}
+            
+            ${pages[pages.length - 1] < safePages - 1 && html`<span class="px-2 text-gray-400">...</span>`}
+            
+            <button
+              onClick=${() => onChange(safeCurrent + 1)}
+              disabled=${safeCurrent === safePages - 1}
+              class="p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-dark-hover disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              title="Next page"
+            >
+              <${Icon} name="mdi:chevron-right" size=${20} />
+            </button>
+            <button
+              onClick=${() => onChange(safePages - 1)}
+              disabled=${safeCurrent === safePages - 1}
+              class="p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-dark-hover disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              title="Last page"
+            >
+              <${Icon} name="mdi:page-last" size=${20} />
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    // Empty state component
+    function EmptyState({ icon, title, description }) {
+      return html`
+        <div class="flex flex-col items-center justify-center py-16 text-gray-400">
+          <${Icon} name=${icon} size=${64} className="mb-4 opacity-50" />
+          <h3 class="text-lg font-medium mb-2">${title}</h3>
+          <p class="text-sm text-center max-w-sm">${description}</p>
+        </div>
+      `;
+    }
+
+    // Main App component
+    function App() {
+      const [query, setQuery] = useState('');
+      const [icons, setIcons] = useState([]);
+      const [total, setTotal] = useState(0);
+      const [currentPage, setCurrentPage] = useState(0);
+      const [isLoading, setIsLoading] = useState(false);
+      const [activeTab, setActiveTab] = useState('search');
+      const [favorites, setFavorites] = useState(() => storage.get(STORAGE_KEYS.favorites, []));
+      const [recents, setRecents] = useState(() => storage.get(STORAGE_KEYS.recents, []));
+      const [toast, setToast] = useState(null);
+      const [darkMode, setDarkMode] = useState(() => {
+        const stored = storage.get(STORAGE_KEYS.darkMode, true);
+        return stored;
+      });
+      const [favPage, setFavPage] = useState(0);
+      const [recentPage, setRecentPage] = useState(0);
+
+      // Apply dark mode
+      useEffect(() => {
+        document.documentElement.classList.toggle('dark', darkMode);
+        storage.set(STORAGE_KEYS.darkMode, darkMode);
+      }, [darkMode]);
+
+      // Persist favorites
+      useEffect(() => {
+        storage.set(STORAGE_KEYS.favorites, favorites);
+      }, [favorites]);
+
+      // Persist recents
+      useEffect(() => {
+        storage.set(STORAGE_KEYS.recents, recents);
+      }, [recents]);
+
+      // Reset pagination when switching tabs
+      useEffect(() => {
+        setCurrentPage(0);
+        setFavPage(0);
+        setRecentPage(0);
+      }, [activeTab]);
+
+      // Search icons - fetch up to API_LIMIT icons and paginate locally
+      const searchIcons = useCallback(async (resetPage = true) => {
+        if (!query.trim()) return;
+        
+        setIsLoading(true);
+        if (resetPage) setCurrentPage(0);
+        
+        try {
+          const url = `${API_BASE}/search?query=${encodeURIComponent(query)}&limit=${API_LIMIT}`;
+          const res = await fetch(url);
+          const data = await res.json();
+          
+          setIcons(data.icons || []);
+          setTotal(data.total || 0);
+        } catch (error) {
+          console.error('Search failed:', error);
+          setToast({ message: 'Search failed. Please try again.', type: 'error' });
+        } finally {
+          setIsLoading(false);
+        }
+      }, [query]);
+
+      // Toggle favorite
+      const toggleFavorite = useCallback((icon) => {
+        setFavorites(prev => {
+          const exists = prev.includes(icon);
+          return exists ? prev.filter(i => i !== icon) : [...prev, icon];
+        });
+      }, []);
+
+      // Add to recents
+      const addRecent = useCallback((icon) => {
+        setRecents(prev => {
+          const filtered = prev.filter(i => i !== icon);
+          return [icon, ...filtered].slice(0, 50);
+        });
+      }, []);
+
+      // Handle search
+      const handleSearch = useCallback(() => {
+        searchIcons(true);
+      }, [searchIcons]);
+
+      // Auto-search with debounce when user stops typing (250ms)
+      useEffect(() => {
+        if (activeTab !== 'search' || !query.trim()) return;
+        
+        const debounceTimer = setTimeout(() => {
+          searchIcons(true);
+        }, 250);
+        
+        return () => clearTimeout(debounceTimer);
+      }, [query, activeTab, searchIcons]);
+
+      // Get paginated icons based on tab
+      const { displayIcons, pageTotal } = useMemo(() => {
+        switch (activeTab) {
+          case 'favorites':
+            return {
+              displayIcons: favorites,
+              pageTotal: favorites.length
+            };
+          case 'recents':
+            return {
+              displayIcons: recents,
+              pageTotal: recents.length
+            };
+          default:
+            return {
+              displayIcons: icons,
+              pageTotal: total
+            };
+        }
+      }, [activeTab, favorites, recents, icons, total]);
+
+      const totalPages = Math.ceil(pageTotal / ITEMS_PER_PAGE);
+      const activePage = activeTab === 'favorites' ? favPage : activeTab === 'recents' ? recentPage : currentPage;
+      
+      const handlePaginationChange = useCallback((page) => {
+        if (activeTab === 'search') {
+          setCurrentPage(page);
+        } else if (activeTab === 'favorites') {
+          setFavPage(page);
+        } else {
+          setRecentPage(page);
+        }
+      }, [activeTab]);
+
+      // All tabs now use local pagination
+      const startIdx = activePage * ITEMS_PER_PAGE;
+      const paginatedIcons = displayIcons.slice(startIdx, startIdx + ITEMS_PER_PAGE);
+
+      return html`
+        <div class="min-h-screen">
+          <header class="sticky top-0 z-40 bg-white/80 dark:bg-dark-bg/80 backdrop-blur-lg border-b border-gray-200 dark:border-dark-border">
+            <div class="max-w-6xl mx-auto px-4 py-4">
+              <div class="flex items-center justify-between mb-4">
+                <h1 class="text-2xl font-bold flex items-center gap-2">
+                  <${Icon} name="mdi:shape" size=${28} className="text-blue-500" />
+                  Icon Searcher
+                </h1>
+                <button
+                  onClick=${() => setDarkMode(!darkMode)}
+                  class="p-2 rounded-lg bg-gray-100 dark:bg-dark-card hover:bg-gray-200 dark:hover:bg-dark-hover transition-colors"
+                  title=${darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+                >
+                  <${Icon} name=${darkMode ? 'mdi:weather-sunny' : 'mdi:weather-night'} size=${20} />
+                </button>
+              </div>
+              
+              <div class="flex flex-col sm:flex-row gap-4">
+                <div class="flex-1">
+                  <${SearchInput}
+                    value=${query}
+                    onChange=${setQuery}
+                    onSearch=${handleSearch}
+                    isLoading=${isLoading}
+                  />
+                </div>
+                <${Tabs} activeTab=${activeTab} onChange=${setActiveTab} />
+              </div>
+            </div>
+          </header>
+
+          <main class="max-w-6xl mx-auto px-4 py-6">
+            ${pageTotal > 0 && html`
+              <div class="mb-4 text-sm text-gray-500 dark:text-gray-400">
+                ${activeTab === 'search' 
+                  ? html`Found <span class="font-medium text-gray-700 dark:text-gray-200">${total.toLocaleString()}</span> icons for "${query}"`
+                  : html`${pageTotal} ${activeTab === 'favorites' ? 'favorites' : 'recent'} icons`
+                }
+              </div>
+            `}
+
+            ${paginatedIcons.length > 0 ? html`
+              <${Fragment}>
+                <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
+                  ${paginatedIcons.map(icon => html`
+                    <${IconCard}
+                      key=${icon}
+                      icon=${icon}
+                      isFavorite=${favorites.includes(icon)}
+                      onToggleFavorite=${toggleFavorite}
+                      onCopy=${(msg) => setToast({ message: msg, type: 'success' })}
+                      onAddRecent=${addRecent}
+                    />
+                  `)}
+                </div>
+
+                ${totalPages > 1 ? html`
+                  <${Pagination}
+                    currentPage=${activePage}
+                    totalPages=${totalPages}
+                    totalResults=${pageTotal}
+                    start=${startIdx}
+                    end=${Math.min(startIdx + ITEMS_PER_PAGE, pageTotal)}
+                    onChange=${handlePaginationChange}
+                  />
+                ` : null}
+              </${Fragment}>
+            ` : html`
+              <${EmptyState}
+                icon=${activeTab === 'search' ? 'mdi:magnify' : activeTab === 'favorites' ? 'mdi:heart-outline' : 'mdi:history'}
+                title=${
+                  activeTab === 'search' 
+                    ? 'Search for icons' 
+                    : activeTab === 'favorites' 
+                      ? 'No favorites yet' 
+                      : 'No recent icons'
+                }
+                description=${
+                  activeTab === 'search'
+                    ? 'Enter a search term to find icons from 275,000+ options'
+                    : activeTab === 'favorites'
+                      ? 'Click the heart icon on any icon to add it to your favorites'
+                      : 'Copy an icon to add it to your recent history'
+                }
+              />
+            `}
+          </main>
+
+          ${toast && html`
+            <${Toast}
+              message=${toast.message}
+              type=${toast.type}
+              onClose=${() => setToast(null)}
+            />
+          `}
+        </div>
+      `;
+    }
+
+    // Render the app
+    render(html`<${App} />`, document.getElementById('app'));
+  </script>
+</body>
+</html>
